@@ -7,91 +7,53 @@ import MetaTagDetails from "./MetaTagDetails";
 import ThemeToggle from "./ThemeToggle";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { SearchCheck, Globe } from "lucide-react";
-
-// TODO: Remove mock functionality when integrating with real backend
-interface AnalysisResult {
-  url: string;
-  title?: string;
-  description?: string;
-  ogTitle?: string;
-  ogDescription?: string;
-  ogImage?: string;
-  score: number;
-  issues: {
-    type: 'error' | 'warning' | 'success';
-    message: string;
-  }[];
-  tags: {
-    name: string;
-    content: string;
-    status: 'good' | 'warning' | 'missing';
-    recommendation?: string;
-  }[];
-}
+import { SearchCheck, Globe, AlertCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import type { SEOAnalysisResponse } from "@shared/schema";
 
 export default function SEOAnalyzer() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [result, setResult] = useState<SEOAnalysisResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const handleAnalyze = async (url: string) => {
     setIsAnalyzing(true);
-    console.log('Analyzing URL:', url);
+    setError(null);
+    setResult(null);
     
-    // TODO: Replace with real API call
-    setTimeout(() => {
-      const mockResult: AnalysisResult = {
-        url,
-        title: `${new URL(url).hostname} - Professional Website`,
-        description: `Discover amazing content and services at ${new URL(url).hostname}. Join thousands of satisfied customers.`,
-        ogTitle: `${new URL(url).hostname} - Social Media Ready`,
-        ogDescription: `Professional website with great content at ${new URL(url).hostname}`,
-        ogImage: "https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=1200&h=630&fit=crop",
-        score: Math.floor(Math.random() * 40) + 60, // Random score between 60-100
-        issues: [
-          { type: 'success', message: 'Title tag optimized' },
-          { type: 'warning', message: 'Meta description could be longer' },
-          { type: 'error', message: 'Missing canonical URL' }
-        ],
-        tags: [
-          {
-            name: 'title',
-            content: `${new URL(url).hostname} - Professional Website`,
-            status: 'good'
-          },
-          {
-            name: 'description',
-            content: `Discover amazing content at ${new URL(url).hostname}`,
-            status: 'warning',
-            recommendation: 'Consider expanding to 150-160 characters for better SERP display'
-          },
-          {
-            name: 'canonical',
-            content: '',
-            status: 'missing',
-            recommendation: 'Add canonical URL to avoid duplicate content issues'
-          },
-          {
-            name: 'og:title',
-            content: `${new URL(url).hostname} - Social Media Ready`,
-            status: 'good'
-          },
-          {
-            name: 'og:description',
-            content: `Professional website with great content`,
-            status: 'good'
-          },
-          {
-            name: 'og:image',
-            content: 'https://example.com/og-image.jpg',
-            status: 'good'
-          }
-        ]
-      };
+    try {
+      console.log('Analyzing URL:', url);
       
-      setResult(mockResult);
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Analysis failed');
+      }
+
+      const analysisResult = await response.json();
+      setResult(analysisResult);
+      console.log('Analysis completed:', analysisResult);
+      
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'An unexpected error occurred';
+      setError(errorMessage);
+      console.error('Analysis error:', err);
+    } finally {
       setIsAnalyzing(false);
-    }, 2000);
+    }
+  };
+
+  const handleRetry = () => {
+    if (result?.url) {
+      handleAnalyze(result.url);
+    }
   };
 
   return (
@@ -131,6 +93,25 @@ export default function SEOAnalyzer() {
           </Card>
         )}
 
+        {error && !isAnalyzing && (
+          <Card className="max-w-2xl mx-auto border-destructive">
+            <CardContent className="p-6">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="h-5 w-5 text-destructive mt-0.5 flex-shrink-0" />
+                <div className="flex-1">
+                  <h3 className="font-medium text-destructive mb-2">Analysis Failed</h3>
+                  <p className="text-sm text-muted-foreground mb-4" data-testid="text-error-message">
+                    {error}
+                  </p>
+                  <Button onClick={handleRetry} size="sm" variant="outline" data-testid="button-retry">
+                    Try Again
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {result && !isAnalyzing && (
           <div className="space-y-6">
             <div className="text-center">
@@ -165,9 +146,9 @@ export default function SEOAnalyzer() {
                   />
                   <SocialPreview
                     platform="twitter"
-                    title={result.ogTitle || result.title}
-                    description={result.ogDescription || result.description}
-                    image={result.ogImage}
+                    title={result.twitterTitle || result.ogTitle || result.title}
+                    description={result.twitterDescription || result.ogDescription || result.description}
+                    image={result.twitterImage || result.ogImage}
                     url={result.url}
                   />
                 </div>

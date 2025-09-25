@@ -1,18 +1,43 @@
-import { sql } from "drizzle-orm";
-import { pgTable, text, varchar } from "drizzle-orm/pg-core";
-import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-export const users = pgTable("users", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  username: text("username").notNull().unique(),
-  password: text("password").notNull(),
+// SEO Analysis Types
+export const seoIssueSchema = z.object({
+  type: z.enum(['error', 'warning', 'success']),
+  message: z.string(),
 });
 
-export const insertUserSchema = createInsertSchema(users).pick({
-  username: true,
-  password: true,
+export const metaTagSchema = z.object({
+  name: z.string(),
+  content: z.string(),
+  status: z.enum(['good', 'warning', 'missing']),
+  recommendation: z.string().optional(),
 });
 
-export type InsertUser = z.infer<typeof insertUserSchema>;
-export type User = typeof users.$inferSelect;
+export const seoAnalysisRequestSchema = z.object({
+  url: z.string().url(),
+});
+
+export const seoAnalysisResponseSchema = z.object({
+  url: z.string(),
+  title: z.string().optional(),
+  description: z.string().optional(),
+  ogTitle: z.string().optional(),
+  ogDescription: z.string().optional(),
+  ogImage: z.string().optional(),
+  twitterTitle: z.string().optional(),
+  twitterDescription: z.string().optional(),
+  twitterImage: z.string().optional(),
+  canonical: z.string().optional(),
+  robots: z.string().optional(),
+  viewport: z.string().optional(),
+  score: z.number().min(0).max(100),
+  issues: z.array(seoIssueSchema),
+  tags: z.array(metaTagSchema),
+  analyzedAt: z.string(),
+});
+
+// Type exports
+export type SEOIssue = z.infer<typeof seoIssueSchema>;
+export type MetaTag = z.infer<typeof metaTagSchema>;
+export type SEOAnalysisRequest = z.infer<typeof seoAnalysisRequestSchema>;
+export type SEOAnalysisResponse = z.infer<typeof seoAnalysisResponseSchema>;
