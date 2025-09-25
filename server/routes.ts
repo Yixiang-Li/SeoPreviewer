@@ -10,8 +10,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Validate request body
       const parseResult = seoAnalysisRequestSchema.safeParse(req.body);
       if (!parseResult.success) {
+        const errorMessages = parseResult.error.errors.map(err => err.message).join(', ');
         return res.status(400).json({
           error: "Invalid request",
+          message: `Invalid input: ${errorMessages}`,
           details: parseResult.error.errors
         });
       }

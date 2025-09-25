@@ -1,6 +1,12 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { URL } from 'url';
+import { promisify } from 'util';
+import { resolve4, resolve6 } from 'dns';
 import type { SEOAnalysisResponse, SEOIssue, MetaTag } from '@shared/schema';
+
+const dnsResolve4 = promisify(resolve4);
+const dnsResolve6 = promisify(resolve6);
 
 interface HTMLMetaData {
   title?: string;
@@ -18,22 +24,64 @@ interface HTMLMetaData {
 }
 
 export class SEOAnalyzerService {
-  private readonly USER_AGENT = 'SEO-Analyzer-Bot/1.0 (Website SEO Analysis Tool)';
+  private readonly USER_AGENT = 'Mozilla/5.0 (compatible; SEO-Analyzer-Bot/1.0; +https://seo-analyzer.example.com)';
   private readonly TIMEOUT = 10000; // 10 seconds
+  private readonly MAX_CONTENT_LENGTH = 10 * 1024 * 1024; // 10MB
+  private readonly ALLOWED_PORTS = new Set([80, 443, 8080, 8443]);
+  
+  // Private IP ranges to block (SSRF protection)
+  private readonly BLOCKED_IP_RANGES = [
+    // IPv4 private ranges
+    /^0\./,                           // 0.0.0.0/8 (reserved)
+    /^10\./,                          // 10.0.0.0/8 (private)
+    /^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\./,  // 100.64.0.0/10 (carrier-grade NAT)
+    /^127\./,                         // 127.0.0.0/8 (localhost)
+    /^169\.254\./,                    // 169.254.0.0/16 (link-local)
+    /^172\.(1[6-9]|2[0-9]|3[01])\./,  // 172.16.0.0/12 (private)
+    /^192\.0\.0\./,                   // 192.0.0.0/24 (reserved)
+    /^192\.168\./,                    // 192.168.0.0/16 (private)
+    /^198\.(1[8-9])\./,               // 198.18.0.0/15 (benchmark testing)
+    /^22[4-9]\./,                     // 224.0.0.0/4 (multicast)
+    /^2[3-5][0-9]\./,                 // 224.0.0.0/4 continued
+    /^255\.255\.255\.255$/,           // 255.255.255.255 (broadcast)
+    
+    // IPv6 ranges
+    /^::1$/,                          // IPv6 localhost
+    /^::ffff:127\./,                  // IPv4-mapped IPv6 localhost
+    /^::ffff:10\./,                   // IPv4-mapped IPv6 private
+    /^::ffff:172\.(1[6-9]|2[0-9]|3[01])\./,  // IPv4-mapped IPv6 private
+    /^::ffff:192\.168\./,             // IPv4-mapped IPv6 private
+    /^fc00:/,                         // IPv6 unique local (fc00::/8)
+    /^fd00:/,                         // IPv6 unique local (fd00::/8)
+    /^fe80:/,                         // IPv6 link-local
+  ];
+  
+  // Metadata service IPs
+  private readonly METADATA_IPS = new Set([
+    '169.254.169.254',  // AWS/GCP/Azure metadata
+    '169.254.169.123',  // Oracle Cloud metadata
+    '100.100.100.200',  // Alibaba Cloud metadata
+  ]);
 
   async analyzeWebsite(url: string): Promise<SEOAnalysisResponse> {
     try {
+      // Validate and sanitize URL
+      const validatedUrl = await this.validateAndSanitizeUrl(url);
+      
+      // Preflight check to verify content type and size
+      await this.preflightCheck(validatedUrl);
+      
       // Fetch the HTML content
-      const html = await this.fetchHTML(url);
+      const html = await this.fetchHTML(validatedUrl);
       
       // Parse meta tags
       const metaData = this.parseMetaTags(html);
       
       // Generate SEO score and issues
-      const { score, issues, tags } = this.calculateSEOScore(metaData, url);
+      const { score, issues, tags } = this.calculateSEOScore(metaData, validatedUrl);
 
       return {
-        url,
+        url: validatedUrl,
         ...metaData,
         score,
         issues,
@@ -42,6 +90,132 @@ export class SEOAnalyzerService {
       };
     } catch (error) {
       console.error('SEO Analysis error:', error);
+      throw error;
+    }
+  }
+
+  private async validateAndSanitizeUrl(url: string): Promise<string> {
+    let parsedUrl: URL;
+    
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      throw new Error('Invalid URL format');
+    }
+
+    // Only allow HTTP and HTTPS protocols
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      throw new Error('Only HTTP and HTTPS protocols are allowed');
+    }
+
+    // Check port restrictions
+    const port = parsedUrl.port ? parseInt(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80);
+    if (!this.ALLOWED_PORTS.has(port)) {
+      throw new Error(`Port ${port} is not allowed`);
+    }
+
+    // Resolve hostname to IP and check for blocked ranges
+    await this.validateHostname(parsedUrl.hostname);
+
+    return parsedUrl.toString();
+  }
+
+  private async validateHostname(hostname: string): Promise<void> {
+    let ipv4Success = false;
+    let ipv6Success = false;
+    
+    // Check if hostname is already an IP address
+    if (this.isIPAddress(hostname)) {
+      if (this.isBlockedIP(hostname)) {
+        throw new Error(`Access to IP ${hostname} is blocked for security reasons`);
+      }
+      if (this.METADATA_IPS.has(hostname)) {
+        throw new Error('Access to metadata services is blocked');
+      }
+      return;
+    }
+    
+    try {
+      // Try IPv4 resolution
+      try {
+        const ipv4Addresses = await dnsResolve4(hostname);
+        for (const ip of ipv4Addresses) {
+          if (this.isBlockedIP(ip)) {
+            throw new Error(`Access to IP ${ip} is blocked for security reasons`);
+          }
+          if (this.METADATA_IPS.has(ip)) {
+            throw new Error('Access to metadata services is blocked');
+          }
+        }
+        ipv4Success = true;
+      } catch (dnsError) {
+        // IPv4 resolution failed
+      }
+
+      // Try IPv6 resolution (optional if IPv4 succeeded)
+      try {
+        const ipv6Addresses = await dnsResolve6(hostname);
+        for (const ip of ipv6Addresses) {
+          if (this.isBlockedIP(ip)) {
+            throw new Error(`Access to IP ${ip} is blocked for security reasons`);
+          }
+        }
+        ipv6Success = true;
+      } catch (dnsError) {
+        // IPv6 resolution failed - acceptable if IPv4 succeeded
+      }
+
+      // Require at least one successful resolution
+      if (!ipv4Success && !ipv6Success) {
+        throw new Error(`Unable to resolve hostname: ${hostname}`);
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error(`DNS resolution failed for hostname: ${hostname}`);
+    }
+  }
+
+  private isIPAddress(hostname: string): boolean {
+    // Simple check for IP addresses (IPv4 and IPv6)
+    return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname) || 
+           /^(?:[0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$/.test(hostname);
+  }
+
+  private isBlockedIP(ip: string): boolean {
+    return this.BLOCKED_IP_RANGES.some(range => range.test(ip));
+  }
+
+  private async preflightCheck(url: string): Promise<void> {
+    try {
+      const response = await axios.head(url, {
+        timeout: this.TIMEOUT,
+        headers: {
+          'User-Agent': this.USER_AGENT,
+        },
+        maxRedirects: 0, // Disable automatic redirects for security
+        validateStatus: (status) => status < 400,
+      });
+
+      // Check content type
+      const contentType = response.headers['content-type'];
+      if (contentType && !contentType.includes('text/html')) {
+        throw new Error('URL does not serve HTML content');
+      }
+
+      // Check content length
+      const contentLength = response.headers['content-length'];
+      if (contentLength && parseInt(contentLength) > this.MAX_CONTENT_LENGTH) {
+        throw new Error(`Content too large (${contentLength} bytes). Maximum allowed: ${this.MAX_CONTENT_LENGTH} bytes`);
+      }
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 405) {
+          // HEAD method not allowed, proceed with GET but be cautious
+          return;
+        }
+      }
       throw error;
     }
   }
@@ -59,9 +233,32 @@ export class SEOAnalyzerService {
           'Connection': 'keep-alive',
           'Upgrade-Insecure-Requests': '1',
         },
-        maxRedirects: 5,
-        validateStatus: (status) => status < 400,
+        maxRedirects: 0, // Disable automatic redirects for security
+        maxContentLength: this.MAX_CONTENT_LENGTH,
+        maxBodyLength: this.MAX_CONTENT_LENGTH,
+        responseType: 'text',
+        validateStatus: (status) => status < 400 || (status >= 300 && status < 400), // Allow redirects
       });
+
+      // Handle redirects manually for security
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.location;
+        if (location) {
+          // Only follow one redirect to reduce complexity
+          const redirectUrl = new URL(location, url).toString();
+          console.log(`Following redirect from ${url} to ${redirectUrl}`);
+          
+          // Validate redirect target
+          const validatedRedirectUrl = await this.validateAndSanitizeUrl(redirectUrl);
+          return this.fetchHTML(validatedRedirectUrl);
+        }
+      }
+
+      // Verify content type for non-preflight requests
+      const contentType = response.headers['content-type'];
+      if (contentType && !contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+        throw new Error(`URL does not serve HTML content (Content-Type: ${contentType})`);
+      }
 
       return response.data;
     } catch (error) {
